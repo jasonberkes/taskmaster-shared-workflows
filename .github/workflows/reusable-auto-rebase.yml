@@ -26,9 +26,6 @@ on:
         required: false
         description: 'API key for TaskMaster (enables AI conflict resolution)'
 
-permissions:
-  contents: write
-  pull-requests: write
 
 jobs:
   auto-rebase:

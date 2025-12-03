@@ -3,6 +3,10 @@ name: Test Reusable Workflow
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   test:
     uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-auto-rebase.yml@main

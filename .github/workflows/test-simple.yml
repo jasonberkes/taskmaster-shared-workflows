@@ -3,6 +3,10 @@ name: Test Simple
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   call-reusable:
     uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-simple-test.yml@main

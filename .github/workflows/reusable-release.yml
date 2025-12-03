@@ -31,8 +31,6 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
 
 jobs:
   release:
