@@ -1,11 +1,15 @@
-name: Simple Test Reusable
+name: Simple Test with Permissions
 
 on:
   workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Hello
-        run: echo "Hello from reusable workflow!"
+        run: echo "Hello from reusable workflow with permissions!"
