@@ -1,0 +1,107 @@
+# =============================================================================
+# Reusable .NET Build & Test Workflow
+# =============================================================================
+# Builds and tests .NET projects with NuGet caching.
+#
+# Usage:
+#   jobs:
+#     build:
+#       uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-dotnet-build.yml@main
+#       with:
+#         dotnet-version: '9.0.x'
+#         solution-path: '**/*.sln'
+# =============================================================================
+
+name: Reusable .NET Build
+
+on:
+  workflow_call:
+    inputs:
+      dotnet-version:
+        description: '.NET SDK version'
+        required: false
+        type: string
+        default: '9.0.x'
+      solution-path:
+        description: 'Path to solution or project file'
+        required: false
+        type: string
+        default: '**/*.sln'
+      test-project-path:
+        description: 'Path to test projects (glob pattern)'
+        required: false
+        type: string
+        default: '**/tests/**/*.csproj'
+      configuration:
+        description: 'Build configuration'
+        required: false
+        type: string
+        default: 'Release'
+      run-tests:
+        description: 'Run tests'
+        required: false
+        type: boolean
+        default: true
+      collect-coverage:
+        description: 'Collect code coverage'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      build-success:
+        description: 'Whether build succeeded'
+        value: ${{ jobs.build.outputs.success }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      success: ${{ steps.build.outcome == 'success' }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore ${{ inputs.solution-path }}
+
+      - name: Build
+        id: build
+        run: |
+          dotnet build ${{ inputs.solution-path }} \
+            --configuration ${{ inputs.configuration }} \
+            --no-restore
+          echo "✅ Build successful"
+
+      - name: Test
+        if: inputs.run-tests
+        run: |
+          TEST_ARGS="--configuration ${{ inputs.configuration }} --no-build --verbosity normal"
+          
+          if [ "${{ inputs.collect-coverage }}" = "true" ]; then
+            TEST_ARGS="$TEST_ARGS --collect:\"XPlat Code Coverage\""
+          fi
+          
+          dotnet test ${{ inputs.test-project-path }} $TEST_ARGS
+          echo "✅ Tests passed"
+
+      - name: Upload coverage
+        if: inputs.run-tests && inputs.collect-coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: '**/coverage.cobertura.xml'
+          retention-days: 5

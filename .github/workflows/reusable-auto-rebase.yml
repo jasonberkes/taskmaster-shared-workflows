@@ -1,0 +1,240 @@
+# =============================================================================
+# Reusable Auto-Rebase Workflow
+# =============================================================================
+# Automatically rebases all open PRs when main branch is updated.
+# On conflict, escalates to TaskMaster for AI-assisted resolution.
+#
+# Usage in calling repo:
+#   jobs:
+#     rebase:
+#       uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-auto-rebase.yml@main
+#       secrets: inherit
+# =============================================================================
+
+name: Reusable Auto-Rebase
+
+on:
+  workflow_call:
+    inputs:
+      taskmaster_api_url:
+        description: 'TaskMaster API URL for AI escalation'
+        required: false
+        type: string
+        default: 'https://taskmaster-platform.kindocean-04b86380.eastus2.azurecontainerapps.io'
+    secrets:
+      TASKMASTER_API_KEY:
+        required: false
+        description: 'API key for TaskMaster (enables AI conflict resolution)'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-rebase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get open PRs
+        id: get-prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching open PRs..."
+          prs=$(gh pr list --state open --json number,headRefName,title --jq '.')
+          echo "prs=$prs" >> $GITHUB_OUTPUT
+          echo "Found PRs:"
+          echo "$prs" | jq -r '.[] | "  PR #\(.number): \(.headRefName)"'
+
+      - name: Rebase PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TASKMASTER_API_KEY: ${{ secrets.TASKMASTER_API_KEY }}
+          TASKMASTER_API_URL: ${{ inputs.taskmaster_api_url }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          prs='${{ steps.get-prs.outputs.prs }}'
+          
+          if [ -z "$prs" ] || [ "$prs" == "[]" ]; then
+            echo "No open PRs to rebase"
+            exit 0
+          fi
+          
+          # Ensure we have latest main
+          git fetch origin main
+          git checkout main
+          git pull origin main
+          
+          # Track results
+          success_count=0
+          conflict_count=0
+          skip_count=0
+          
+          # Process each PR
+          echo "$prs" | jq -c '.[]' | while read -r pr; do
+            pr_number=$(echo "$pr" | jq -r '.number')
+            branch=$(echo "$pr" | jq -r '.headRefName')
+            pr_title=$(echo "$pr" | jq -r '.title')
+            
+            echo ""
+            echo "=========================================="
+            echo "Processing PR #$pr_number: $branch"
+            echo "=========================================="
+            
+            # Fetch the branch
+            if ! git fetch origin "$branch" 2>/dev/null; then
+              echo "⚠️ Could not fetch branch $branch - skipping"
+              skip_count=$((skip_count + 1))
+              continue
+            fi
+            
+            # Checkout the branch
+            git checkout "$branch" 2>/dev/null || git checkout -b "$branch" "origin/$branch"
+            
+            # Try to rebase
+            echo "Attempting rebase onto main..."
+            if git rebase main 2>&1; then
+              echo "✅ Rebase successful for PR #$pr_number"
+              
+              # Push the rebased branch
+              if git push origin "$branch" --force-with-lease 2>&1; then
+                echo "✅ Pushed rebased branch $branch"
+                success_count=$((success_count + 1))
+              else
+                echo "⚠️ Could not push branch $branch"
+                git rebase --abort 2>/dev/null || true
+              fi
+            else
+              echo "❌ Rebase failed for PR #$pr_number due to conflicts"
+              
+              # Capture conflict details
+              conflicted_files=$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+              
+              git rebase --abort
+              
+              # Extract WorkItem ID from branch name if present
+              workitem_id=$(echo "$branch" | grep -oE '^fix/[0-9]+' | grep -oE '[0-9]+' || echo "")
+              
+              echo "Conflicted files: $conflicted_files"
+              echo "Related WorkItem: ${workitem_id:-none}"
+              
+              # Escalate to TaskMaster for AI-assisted resolution
+              if [ -n "$TASKMASTER_API_KEY" ]; then
+                echo ""
+                echo "🤖 Escalating to TaskMaster for AI-assisted conflict resolution..."
+                
+                # Parse repo owner and name
+                repo_owner=$(echo "$REPO_NAME" | cut -d'/' -f1)
+                repo_name=$(echo "$REPO_NAME" | cut -d'/' -f2)
+                
+                description="## Merge Conflict Resolution Required
+
+**Repository:** $REPO_NAME
+**Source PR:** #$pr_number
+**Branch:** \`$branch\`
+**PR Title:** $pr_title
+**Conflicted Files:** $conflicted_files
+
+## Context
+This PR has conflicts with the \`main\` branch that could not be automatically rebased.
+
+## Instructions for Claude Code
+1. Clone repo: \`git clone https://github.com/$REPO_NAME\`
+2. Checkout branch: \`git checkout $branch\`
+3. Attempt rebase: \`git rebase origin/main\`
+4. Analyze and resolve each conflict
+5. Verify build passes
+6. Push resolved branch: \`git push origin $branch --force-with-lease\`
+
+## Related WorkItem
+${workitem_id:+Original WorkItem: #$workitem_id}"
+
+                response=$(curl -s -w "\n%{http_code}" -X POST \
+                  "$TASKMASTER_API_URL/api/workitems" \
+                  -H "Content-Type: application/json" \
+                  -H "X-API-Key: $TASKMASTER_API_KEY" \
+                  -d "{
+                    \"title\": \"[$repo_name] Resolve merge conflicts in PR #$pr_number\",
+                    \"description\": $(echo "$description" | jq -Rs .),
+                    \"type\": \"Bug\",
+                    \"priority\": 9,
+                    \"assignedTo\": \"Claude Code\",
+                    \"gitHubRepoOwner\": \"$repo_owner\",
+                    \"gitHubRepoName\": \"$repo_name\"
+                  }")
+                
+                http_code=$(echo "$response" | tail -n1)
+                body=$(echo "$response" | sed '$d')
+                
+                if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
+                  new_wi_id=$(echo "$body" | jq -r '.id // .Id // "unknown"')
+                  echo "✅ Created WorkItem #$new_wi_id for AI-assisted conflict resolution"
+                  
+                  gh pr comment "$pr_number" --body "🤖 **Auto-Rebase Escalated to AI**
+
+This PR has conflicts with \`main\` that require intelligent resolution.
+
+**WorkItem Created:** #$new_wi_id
+**Status:** Assigned to Claude Code for automated conflict resolution
+
+---
+_Escalated by shared auto-rebase workflow_"
+                else
+                  echo "⚠️ Failed to create WorkItem (HTTP $http_code)"
+                  gh pr comment "$pr_number" --body "⚠️ **Auto-Rebase Failed**
+
+Conflicts detected. Manual resolution required.
+
+**Conflicted Files:** $conflicted_files
+
+\`\`\`bash
+git fetch origin main
+git checkout $branch
+git rebase origin/main
+# Resolve conflicts
+git push origin $branch --force-with-lease
+\`\`\`"
+                fi
+              else
+                gh pr comment "$pr_number" --body "⚠️ **Auto-Rebase Failed**
+
+Conflicts detected. Manual resolution required.
+
+**Conflicted Files:** $conflicted_files
+
+\`\`\`bash
+git fetch origin main
+git checkout $branch
+git rebase origin/main
+# Resolve conflicts
+git push origin $branch --force-with-lease
+\`\`\`
+
+_Configure TASKMASTER_API_KEY secret to enable AI-assisted resolution_"
+              fi
+              
+              conflict_count=$((conflict_count + 1))
+            fi
+            
+            git checkout main
+          done
+          
+          echo ""
+          echo "=========================================="
+          echo "Auto-rebase Summary"
+          echo "=========================================="
+          echo "✅ Successfully rebased: $success_count"
+          echo "🤖 Escalated to AI: $conflict_count"
+          echo "⏭️ Skipped: $skip_count"

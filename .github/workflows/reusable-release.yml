@@ -1,0 +1,99 @@
+# =============================================================================
+# Reusable Release Workflow
+# =============================================================================
+# Creates GitHub releases with auto-generated changelog.
+#
+# Usage:
+#   jobs:
+#     release:
+#       uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-release.yml@main
+#       with:
+#         version: '1.0.0'  # Optional, auto-generates if not provided
+# =============================================================================
+
+name: Reusable Release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.0.0). Auto-generates if not provided.'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: 'Create as draft'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            # Auto-generate version based on date and short SHA
+            VERSION="v$(date +'%Y.%m.%d')-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -n "$LAST_TAG" ]; then
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          
+          # Create changelog
+          CHANGELOG="## What's Changed
+
+$COMMITS
+
+**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG:-initial}...${{ steps.version.outputs.version }}"
+          
+          # Save to file (handles multi-line)
+          echo "$CHANGELOG" > changelog.md
+          echo "Generated changelog"
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            FLAGS="$FLAGS --prerelease"
+          fi
+          if [ "${{ inputs.draft }}" = "true" ]; then
+            FLAGS="$FLAGS --draft"
+          fi
+          
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --notes-file changelog.md \
+            $FLAGS
+          
+          echo "✅ Created release ${{ steps.version.outputs.version }}"

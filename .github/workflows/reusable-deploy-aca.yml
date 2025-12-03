@@ -1,0 +1,139 @@
+# =============================================================================
+# Reusable Azure Container Apps Deployment Workflow
+# =============================================================================
+# Deploys containers to Azure Container Apps using Bicep or az CLI.
+#
+# Usage:
+#   jobs:
+#     deploy:
+#       uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-deploy-aca.yml@main
+#       with:
+#         container-app-name: 'my-app'
+#         resource-group: 'my-rg'
+#         image: 'myregistry.azurecr.io/my-app:latest'
+#       secrets: inherit
+# =============================================================================
+
+name: Reusable Deploy to ACA
+
+on:
+  workflow_call:
+    inputs:
+      container-app-name:
+        description: 'Azure Container App name'
+        required: true
+        type: string
+      resource-group:
+        description: 'Azure Resource Group'
+        required: false
+        type: string
+        default: 'tm-rg-prod-eus2'
+      image:
+        description: 'Full container image URL with tag'
+        required: true
+        type: string
+      environment-name:
+        description: 'Container App Environment name (for Bicep deployments)'
+        required: false
+        type: string
+        default: 'tm-cae-prod-eus2'
+      bicep-template:
+        description: 'Path to Bicep template (if using Bicep deployment)'
+        required: false
+        type: string
+        default: ''
+      use-bicep:
+        description: 'Use Bicep deployment (preserves KEDA config)'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+        description: 'Azure service principal credentials JSON'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout
+        if: inputs.use-bicep
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy via Bicep
+        if: inputs.use-bicep && inputs.bicep-template != ''
+        run: |
+          echo "🚀 Deploying via Bicep template..."
+          echo "ℹ️  Using Bicep preserves KEDA/scale configuration"
+          
+          # Get environment ID
+          ENVIRONMENT_ID=$(az containerapp env show \
+            --name ${{ inputs.environment-name }} \
+            --resource-group ${{ inputs.resource-group }} \
+            --query id -o tsv)
+          
+          # Extract image tag
+          IMAGE_TAG=$(echo "${{ inputs.image }}" | rev | cut -d':' -f1 | rev)
+          ACR_SERVER=$(echo "${{ inputs.image }}" | cut -d'/' -f1)
+          
+          echo "Environment ID: $ENVIRONMENT_ID"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "ACR Server: $ACR_SERVER"
+          
+          # Deploy using Bicep
+          az deployment group create \
+            --resource-group ${{ inputs.resource-group }} \
+            --template-file ${{ inputs.bicep-template }} \
+            --parameters environmentId="$ENVIRONMENT_ID" \
+            --parameters imageTag="$IMAGE_TAG" \
+            --parameters acrServer="$ACR_SERVER"
+          
+          echo "✅ Bicep deployment complete"
+
+      - name: Deploy via az CLI
+        if: ${{ !inputs.use-bicep || inputs.bicep-template == '' }}
+        run: |
+          echo "🚀 Deploying via az containerapp update..."
+          echo "⚠️  Note: This may reset some KEDA configuration"
+          
+          az containerapp update \
+            --name ${{ inputs.container-app-name }} \
+            --resource-group ${{ inputs.resource-group }} \
+            --image ${{ inputs.image }}
+          
+          echo "✅ Container App updated"
+
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          CURRENT_IMAGE=$(az containerapp show \
+            --name ${{ inputs.container-app-name }} \
+            --resource-group ${{ inputs.resource-group }} \
+            --query "properties.template.containers[0].image" -o tsv)
+          
+          echo "Current image: $CURRENT_IMAGE"
+          
+          REPLICAS=$(az containerapp show \
+            --name ${{ inputs.container-app-name }} \
+            --resource-group ${{ inputs.resource-group }} \
+            --query "properties.template.scale" -o json)
+          
+          echo "Scale configuration:"
+          echo "$REPLICAS" | jq .
+
+      - name: Output summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **App:** ${{ inputs.container-app-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Resource Group:** ${{ inputs.resource-group }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ inputs.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** ${{ inputs.use-bicep && 'Bicep' || 'az CLI' }}" >> $GITHUB_STEP_SUMMARY
