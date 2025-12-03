@@ -5,5 +5,5 @@ on:
 
 jobs:
   test:
-    uses: ./.github/workflows/reusable-auto-rebase.yml
+    uses: jasonberkes/taskmaster-shared-workflows/.github/workflows/reusable-auto-rebase.yml@main
     secrets: inherit
