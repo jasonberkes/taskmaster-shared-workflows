@@ -53,6 +53,6 @@ Repos using these workflows:
 - taskmaster-platform
 - TaskMaster.AgentFramework
 - TaskMaster.DocumentService
-- TaskMaster.Redis
+- TaskMaster.Memory
 - taskmaster-ui
 - taskmaster-mcp-server
